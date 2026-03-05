@@ -6,6 +6,12 @@ import (
 	corestore "cosmossdk.io/core/store"
 )
 
+// Batch is an alias for corestore.Batch.
+type Batch = corestore.Batch
+
+// Iterator is an alias for corestore.Iterator.
+type Iterator = corestore.Iterator
+
 var (
 	// errBatchClosed is returned when a closed or written batch is used.
 	errBatchClosed = errors.New("batch has been written or closed")

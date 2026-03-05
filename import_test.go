@@ -2,12 +2,50 @@ package iavl
 
 import (
 	"testing"
+	"time"
 
+	corestore "cosmossdk.io/core/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	dbm "github.com/cosmos/iavl/db"
 )
+
+type delayedWriteDB struct {
+	inner      dbm.DB
+	writeDelay time.Duration
+}
+
+func (d *delayedWriteDB) Get(key []byte) ([]byte, error)                { return d.inner.Get(key) }
+func (d *delayedWriteDB) Has(key []byte) (bool, error)                  { return d.inner.Has(key) }
+func (d *delayedWriteDB) Iterator(start, end []byte) (corestore.Iterator, error) {
+	return d.inner.Iterator(start, end)
+}
+func (d *delayedWriteDB) ReverseIterator(start, end []byte) (corestore.Iterator, error) {
+	return d.inner.ReverseIterator(start, end)
+}
+func (d *delayedWriteDB) Close() error { return d.inner.Close() }
+func (d *delayedWriteDB) NewBatch() corestore.Batch {
+	return &delayedWriteBatch{inner: d.inner.NewBatch(), writeDelay: d.writeDelay}
+}
+func (d *delayedWriteDB) NewBatchWithSize(size int) corestore.Batch {
+	return &delayedWriteBatch{inner: d.inner.NewBatchWithSize(size), writeDelay: d.writeDelay}
+}
+
+type delayedWriteBatch struct {
+	inner      corestore.Batch
+	writeDelay time.Duration
+}
+
+func (b *delayedWriteBatch) Set(key, value []byte) error { return b.inner.Set(key, value) }
+func (b *delayedWriteBatch) Delete(key []byte) error     { return b.inner.Delete(key) }
+func (b *delayedWriteBatch) Write() error {
+	time.Sleep(b.writeDelay)
+	return b.inner.Write()
+}
+func (b *delayedWriteBatch) WriteSync() error          { return b.inner.WriteSync() }
+func (b *delayedWriteBatch) Close() error              { return b.inner.Close() }
+func (b *delayedWriteBatch) GetByteSize() (int, error) { return b.inner.GetByteSize() }
 
 func ExampleImporter() {
 	tree := NewMutableTree(dbm.NewMemDB(), 0, false, NewNopLogger())
@@ -189,6 +227,31 @@ func TestImporter_Commit(t *testing.T) {
 	has, err := tree.Has([]byte("key"))
 	require.NoError(t, err)
 	require.True(t, has)
+}
+
+func TestImporter_Commit_WaitsForInflightBatch(t *testing.T) {
+	slowDB := &delayedWriteDB{
+		inner:      dbm.NewMemDB(),
+		writeDelay: 200 * time.Millisecond,
+	}
+	tree := NewMutableTree(slowDB, 0, false, NewNopLogger())
+	importer, err := tree.Import(1)
+	require.NoError(t, err)
+	defer importer.Close()
+
+	err = importer.Add(&ExportNode{Key: []byte("key"), Value: []byte("value"), Version: 1, Height: 0})
+	require.NoError(t, err)
+
+	// Force Commit()'s root-node write to cross the async flush threshold.
+	importer.batchSize = maxBatchSize - 1
+
+	err = importer.Commit()
+	require.NoError(t, err)
+
+	has, err := tree.Has([]byte("key"))
+	require.NoError(t, err)
+	require.True(t, has)
+	require.EqualValues(t, 1, tree.Version())
 }
 
 func TestImporter_Commit_ForwardVersion(t *testing.T) {

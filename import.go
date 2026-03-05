@@ -33,6 +33,15 @@ type Importer struct {
 	inflightCommit <-chan error
 }
 
+func (i *Importer) waitInflight() error {
+	if i == nil || i.inflightCommit == nil {
+		return nil
+	}
+	err := <-i.inflightCommit
+	i.inflightCommit = nil
+	return err
+}
+
 // newImporter creates a new Importer for an empty MutableTree.
 //
 // version should correspond to the version that was initially exported. It must be greater than
@@ -81,13 +90,8 @@ func (i *Importer) writeNode(node *Node) error {
 
 	i.batchSize++
 	if i.batchSize >= maxBatchSize {
-		// Wait for previous batch.
-		var err error
-		if i.inflightCommit != nil {
-			err = <-i.inflightCommit
-			i.inflightCommit = nil
-		}
-		if err != nil {
+		// Wait for previous batch before scheduling a new async write.
+		if err := i.waitInflight(); err != nil {
 			return err
 		}
 		result := make(chan error)
@@ -106,10 +110,7 @@ func (i *Importer) writeNode(node *Node) error {
 // Close frees all resources. It is safe to call multiple times. Uncommitted nodes may already have
 // been flushed to the database, but will not be visible.
 func (i *Importer) Close() {
-	if i.inflightCommit != nil {
-		<-i.inflightCommit
-		i.inflightCommit = nil
-	}
+	_ = i.waitInflight()
 	if i.batch != nil {
 		i.batch.Close()
 	}
@@ -192,6 +193,11 @@ func (i *Importer) Commit() error {
 	if i.tree == nil {
 		return ErrNoImport
 	}
+	// Ensure any async flush scheduled from Add() is durably completed before
+	// we publish the import version and attempt LoadVersion().
+	if err := i.waitInflight(); err != nil {
+		return err
+	}
 
 	switch len(i.stack) {
 	case 0:
@@ -211,6 +217,12 @@ func (i *Importer) Commit() error {
 	default:
 		return fmt.Errorf("invalid node structure, found stack size %v when committing",
 			len(i.stack))
+	}
+	// Root-node write can itself schedule an async flush when batchSize crosses
+	// maxBatchSize. Wait here so LoadVersion() cannot observe an empty DB while
+	// the inflight write is still pending.
+	if err := i.waitInflight(); err != nil {
+		return err
 	}
 
 	err := i.batch.WriteSync()
