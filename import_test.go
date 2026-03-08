@@ -1,6 +1,7 @@
 package iavl
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
@@ -16,8 +17,8 @@ type delayedWriteDB struct {
 	writeDelay time.Duration
 }
 
-func (d *delayedWriteDB) Get(key []byte) ([]byte, error)                { return d.inner.Get(key) }
-func (d *delayedWriteDB) Has(key []byte) (bool, error)                  { return d.inner.Has(key) }
+func (d *delayedWriteDB) Get(key []byte) ([]byte, error) { return d.inner.Get(key) }
+func (d *delayedWriteDB) Has(key []byte) (bool, error)   { return d.inner.Has(key) }
 func (d *delayedWriteDB) Iterator(start, end []byte) (corestore.Iterator, error) {
 	return d.inner.Iterator(start, end)
 }
@@ -46,6 +47,221 @@ func (b *delayedWriteBatch) Write() error {
 func (b *delayedWriteBatch) WriteSync() error          { return b.inner.WriteSync() }
 func (b *delayedWriteBatch) Close() error              { return b.inner.Close() }
 func (b *delayedWriteBatch) GetByteSize() (int, error) { return b.inner.GetByteSize() }
+
+type stagedVisibilityDB struct {
+	visible         *dbm.MemDB
+	staged          *dbm.MemDB
+	checkpointCount int
+}
+
+func newStagedVisibilityDB() *stagedVisibilityDB {
+	return &stagedVisibilityDB{
+		visible: dbm.NewMemDB(),
+		staged:  dbm.NewMemDB(),
+	}
+}
+
+func (d *stagedVisibilityDB) Get(key []byte) ([]byte, error) { return d.visible.Get(key) }
+func (d *stagedVisibilityDB) Has(key []byte) (bool, error)   { return d.visible.Has(key) }
+func (d *stagedVisibilityDB) Iterator(start, end []byte) (corestore.Iterator, error) {
+	return d.visible.Iterator(start, end)
+}
+func (d *stagedVisibilityDB) ReverseIterator(start, end []byte) (corestore.Iterator, error) {
+	return d.visible.ReverseIterator(start, end)
+}
+func (d *stagedVisibilityDB) Close() error { return nil }
+func (d *stagedVisibilityDB) NewBatch() corestore.Batch {
+	return &stagedVisibilityBatch{db: d}
+}
+func (d *stagedVisibilityDB) NewBatchWithSize(size int) corestore.Batch {
+	return &stagedVisibilityBatch{db: d}
+}
+func (d *stagedVisibilityDB) Checkpoint() error {
+	iter, err := d.staged.Iterator(nil, nil)
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	nextVisible := dbm.NewMemDB()
+	for ; iter.Valid(); iter.Next() {
+		if err := nextVisible.Set(iter.Key(), iter.Value()); err != nil {
+			return err
+		}
+	}
+	if err := iter.Error(); err != nil {
+		return err
+	}
+	d.visible = nextVisible
+	d.checkpointCount++
+	return nil
+}
+
+type stagedVisibilityBatch struct {
+	db     *stagedVisibilityDB
+	ops    []stagedVisibilityOp
+	closed bool
+}
+
+type stagedVisibilityOp struct {
+	key   []byte
+	value []byte
+	del   bool
+}
+
+func (b *stagedVisibilityBatch) Set(key, value []byte) error {
+	if b.closed {
+		return ErrNoImport
+	}
+	b.ops = append(b.ops, stagedVisibilityOp{
+		key:   append([]byte(nil), key...),
+		value: append([]byte(nil), value...),
+	})
+	return nil
+}
+
+func (b *stagedVisibilityBatch) Delete(key []byte) error {
+	if b.closed {
+		return ErrNoImport
+	}
+	b.ops = append(b.ops, stagedVisibilityOp{
+		key: append([]byte(nil), key...),
+		del: true,
+	})
+	return nil
+}
+
+func (b *stagedVisibilityBatch) Write() error     { return b.apply() }
+func (b *stagedVisibilityBatch) WriteSync() error { return b.apply() }
+
+func (b *stagedVisibilityBatch) apply() error {
+	if b.closed {
+		return ErrNoImport
+	}
+	for _, op := range b.ops {
+		if op.del {
+			if err := b.db.staged.Delete(op.key); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := b.db.staged.Set(op.key, op.value); err != nil {
+			return err
+		}
+	}
+	b.closed = true
+	return nil
+}
+
+func (b *stagedVisibilityBatch) Close() error {
+	b.closed = true
+	b.ops = nil
+	return nil
+}
+
+func (b *stagedVisibilityBatch) GetByteSize() (int, error) {
+	size := 0
+	for _, op := range b.ops {
+		size += len(op.key) + len(op.value)
+	}
+	return size, nil
+}
+
+type syncVisibilityDB struct {
+	visible *dbm.MemDB
+	pending *dbm.MemDB
+}
+
+func newSyncVisibilityDB() *syncVisibilityDB {
+	return &syncVisibilityDB{
+		visible: dbm.NewMemDB(),
+		pending: dbm.NewMemDB(),
+	}
+}
+
+func (d *syncVisibilityDB) Get(key []byte) ([]byte, error) { return d.visible.Get(key) }
+func (d *syncVisibilityDB) Has(key []byte) (bool, error)   { return d.visible.Has(key) }
+func (d *syncVisibilityDB) Iterator(start, end []byte) (corestore.Iterator, error) {
+	return d.visible.Iterator(start, end)
+}
+func (d *syncVisibilityDB) ReverseIterator(start, end []byte) (corestore.Iterator, error) {
+	return d.visible.ReverseIterator(start, end)
+}
+func (d *syncVisibilityDB) Close() error { return nil }
+func (d *syncVisibilityDB) NewBatch() corestore.Batch {
+	return &syncVisibilityBatch{db: d}
+}
+func (d *syncVisibilityDB) NewBatchWithSize(size int) corestore.Batch {
+	return &syncVisibilityBatch{db: d}
+}
+
+type syncVisibilityBatch struct {
+	db     *syncVisibilityDB
+	ops    []stagedVisibilityOp
+	closed bool
+}
+
+func (b *syncVisibilityBatch) Set(key, value []byte) error {
+	if b.closed {
+		return ErrNoImport
+	}
+	b.ops = append(b.ops, stagedVisibilityOp{
+		key:   append([]byte(nil), key...),
+		value: append([]byte(nil), value...),
+	})
+	return nil
+}
+
+func (b *syncVisibilityBatch) Delete(key []byte) error {
+	if b.closed {
+		return ErrNoImport
+	}
+	b.ops = append(b.ops, stagedVisibilityOp{
+		key: append([]byte(nil), key...),
+		del: true,
+	})
+	return nil
+}
+
+func (b *syncVisibilityBatch) Write() error {
+	return b.apply(b.db.pending)
+}
+
+func (b *syncVisibilityBatch) WriteSync() error {
+	return b.apply(b.db.visible)
+}
+
+func (b *syncVisibilityBatch) apply(target *dbm.MemDB) error {
+	if b.closed {
+		return ErrNoImport
+	}
+	for _, op := range b.ops {
+		if op.del {
+			if err := target.Delete(op.key); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := target.Set(op.key, op.value); err != nil {
+			return err
+		}
+	}
+	b.closed = true
+	return nil
+}
+
+func (b *syncVisibilityBatch) Close() error {
+	b.closed = true
+	b.ops = nil
+	return nil
+}
+
+func (b *syncVisibilityBatch) GetByteSize() (int, error) {
+	size := 0
+	for _, op := range b.ops {
+		size += len(op.key) + len(op.value)
+	}
+	return size, nil
+}
 
 func ExampleImporter() {
 	tree := NewMutableTree(dbm.NewMemDB(), 0, false, NewNopLogger())
@@ -229,6 +445,27 @@ func TestImporter_Commit(t *testing.T) {
 	require.True(t, has)
 }
 
+func TestImporterCommit_CheckpointsBeforeLoadVersionWhenSupported(t *testing.T) {
+	db := newStagedVisibilityDB()
+	tree := NewMutableTree(db, 0, true, NewNopLogger())
+	importer, err := tree.Import(1)
+	require.NoError(t, err)
+	defer importer.Close()
+
+	require.NoError(t, importer.Add(&ExportNode{
+		Key:     []byte("validator"),
+		Value:   []byte("present"),
+		Version: 1,
+		Height:  0,
+	}))
+	require.NoError(t, importer.Commit())
+	require.Equal(t, 1, db.checkpointCount)
+
+	got, err := tree.Get([]byte("validator"))
+	require.NoError(t, err)
+	require.True(t, bytes.Equal([]byte("present"), got))
+}
+
 func TestImporter_Commit_WaitsForInflightBatch(t *testing.T) {
 	slowDB := &delayedWriteDB{
 		inner:      dbm.NewMemDB(),
@@ -252,6 +489,27 @@ func TestImporter_Commit_WaitsForInflightBatch(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, has)
 	require.EqualValues(t, 1, tree.Version())
+}
+
+func TestImporterCommit_UsesWriteSyncForIntermediateFlushes(t *testing.T) {
+	db := newSyncVisibilityDB()
+	tree := NewMutableTree(db, 0, true, NewNopLogger())
+	importer, err := tree.Import(1)
+	require.NoError(t, err)
+	defer importer.Close()
+
+	importer.batchSize = maxBatchSize - 1
+	require.NoError(t, importer.Add(&ExportNode{
+		Key:     []byte("validator"),
+		Value:   []byte("present"),
+		Version: 1,
+		Height:  0,
+	}))
+	require.NoError(t, importer.Commit())
+
+	got, err := tree.Get([]byte("validator"))
+	require.NoError(t, err)
+	require.True(t, bytes.Equal([]byte("present"), got))
 }
 
 func TestImporter_Commit_ForwardVersion(t *testing.T) {

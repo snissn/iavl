@@ -8,6 +8,10 @@ import (
 	"cosmossdk.io/core/store"
 )
 
+type importCheckpointer interface {
+	Checkpoint() error
+}
+
 // maxBatchSize is the maximum size of the import batch before flushing it to the database
 const maxBatchSize = 10000
 
@@ -98,7 +102,10 @@ func (i *Importer) writeNode(node *Node) error {
 		i.inflightCommit = result
 		go func(batch store.Batch) {
 			defer batch.Close()
-			result <- batch.Write()
+			// Import publishes the version immediately after Commit(). Use the
+			// stronger write boundary here as well so flushed nodes are visible to
+			// the final version load under backends that defer unsynced writes.
+			result <- batch.WriteSync()
 		}(i.batch)
 		i.batch = i.tree.ndb.db.NewBatch()
 		i.batchSize = 0
@@ -228,6 +235,11 @@ func (i *Importer) Commit() error {
 	err := i.batch.WriteSync()
 	if err != nil {
 		return err
+	}
+	if cp, ok := i.tree.ndb.db.(importCheckpointer); ok {
+		if err := cp.Checkpoint(); err != nil {
+			return err
+		}
 	}
 	i.tree.ndb.resetLatestVersion(i.version)
 
