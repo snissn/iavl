@@ -98,7 +98,7 @@ func (i *Importer) writeNode(node *Node) error {
 		i.inflightCommit = result
 		go func(batch store.Batch) {
 			defer batch.Close()
-			result <- batch.Write()
+			result <- batch.WriteSync()
 		}(i.batch)
 		i.batch = i.tree.ndb.db.NewBatch()
 		i.batchSize = 0
