@@ -13,6 +13,9 @@ import (
 	iavlrand "github.com/cosmos/iavl/internal/rand"
 )
 
+var benchNodeKeyBytesSink []byte
+var benchNodeSink *Node
+
 func TestNode_encodedSize(t *testing.T) {
 	nodeKey := &NodeKey{
 		version: 1,
@@ -183,6 +186,84 @@ func BenchmarkNode_encodedSize(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		node.encodedSize()
 	}
+}
+
+func BenchmarkNode_GetKey(b *testing.B) {
+	nk := &NodeKey{
+		version: rand.Int63n(10000000),
+		nonce:   uint32(rand.Int31n(10000000)), // nolint:gosec // false positive
+	}
+	node := &Node{
+		nodeKey: nk,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		benchNodeKeyBytesSink = node.GetKey()
+	}
+}
+
+func BenchmarkMakeNode(b *testing.B) {
+	nk := &NodeKey{
+		version: 7,
+		nonce:   42,
+	}
+	child := &NodeKey{
+		version: 6,
+		nonce:   41,
+	}
+
+	leaf := &Node{
+		key:           iavlrand.RandBytes(25),
+		value:         iavlrand.RandBytes(100),
+		nodeKey:       nk,
+		subtreeHeight: 0,
+		size:          1,
+	}
+
+	inner := &Node{
+		key:           iavlrand.RandBytes(25),
+		nodeKey:       nk,
+		subtreeHeight: 1,
+		size:          3,
+		hash:          iavlrand.RandBytes(sha256.Size),
+		leftNodeKey:   child.GetKey(),
+		rightNodeKey:  child.GetKey(),
+	}
+
+	encode := func(n *Node) []byte {
+		var buf bytes.Buffer
+		if err := n.writeBytes(&buf); err != nil {
+			b.Fatalf("writeBytes: %v", err)
+		}
+		return append([]byte(nil), buf.Bytes()...)
+	}
+
+	leafBytes := encode(leaf)
+	innerBytes := encode(inner)
+	nodeKeyBytes := append([]byte(nil), nk.GetKey()...)
+
+	b.Run("leaf", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			n, err := MakeNode(nodeKeyBytes, leafBytes)
+			if err != nil {
+				b.Fatalf("MakeNode(leaf): %v", err)
+			}
+			benchNodeSink = n
+		}
+	})
+
+	b.Run("inner", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			n, err := MakeNode(nodeKeyBytes, innerBytes)
+			if err != nil {
+				b.Fatalf("MakeNode(inner): %v", err)
+			}
+			benchNodeSink = n
+		}
+	})
 }
 
 func BenchmarkNode_WriteBytes(b *testing.B) {

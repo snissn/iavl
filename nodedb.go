@@ -163,12 +163,9 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 	}
 	if buf == nil && !isLegcyNode {
 		// if the node is reformatted by pruning, check against (version, 0)
-		nKey := GetNodeKey(nk)
-		if nKey.nonce == 1 {
-			nodeKey = ndb.nodeKey((&NodeKey{
-				version: nKey.version,
-				nonce:   0,
-			}).GetKey())
+		version, nonce := splitNodeKeyBytes(nk)
+		if nonce == 1 {
+			nodeKey = ndb.nodeKey(makeNodeKeyBytes(version, 0))
 			buf, err = ndb.db.Get(nodeKey)
 			if err != nil {
 				return nil, fmt.Errorf("can't get the reformatted node %v: %v", nk, err)
@@ -926,7 +923,7 @@ func (ndb *nodeDB) getLatestVersion() (int64, error) {
 		k := itr.Key()
 		var nk []byte
 		nodeKeyFormat.Scan(k, &nk)
-		latestVersion = GetNodeKey(nk).version
+		latestVersion, _ = splitNodeKeyBytes(nk)
 		ndb.resetLatestVersion(latestVersion)
 		return latestVersion, nil
 	}
@@ -998,24 +995,25 @@ func (ndb *nodeDB) GetRoot(version int64) ([]byte, error) {
 	if isRef { // point to the prev version
 		switch n {
 		case nodeKeyFormat.Length(): // (prefix, version, 1)
-			nk := GetNodeKey(val[1:])
+			nk := val[1:]
+			version, _ := splitNodeKeyBytes(nk)
 			val, err = ndb.db.Get(nodeKeyFormat.Key(val[1:]))
 			if err != nil {
 				return nil, err
 			}
 			if val == nil { // the prev version does not exist
 				// check if the prev version root is reformatted due to the pruning
-				rnk := &NodeKey{version: nk.version, nonce: 0}
-				val, err = ndb.db.Get(nodeKeyFormat.Key(rnk.GetKey()))
+				rnk := makeNodeKeyBytes(version, 0)
+				val, err = ndb.db.Get(nodeKeyFormat.Key(rnk))
 				if err != nil {
 					return nil, err
 				}
 				if val == nil {
 					return nil, ErrVersionDoesNotExist
 				}
-				return rnk.GetKey(), nil
+				return rnk, nil
 			}
-			return nk.GetKey(), nil
+			return nk, nil
 		case nodeKeyPrefixFormat.Length(): // (prefix, version) before the lazy pruning
 			return append(val[1:], 0, 0, 0, 1), nil
 		default:
