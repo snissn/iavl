@@ -1,12 +1,13 @@
 package cache
 
 import (
-	"container/list"
-
 	ibytes "github.com/cosmos/iavl/internal/bytes"
 )
 
 // Node represents a node eligible for caching.
+//
+// Implementations must return an immutable key for the lifetime of the cache
+// entry. The cache reuses that byte slice for zero-copy lookups.
 type Node interface {
 	GetKey() []byte
 }
@@ -45,73 +46,122 @@ type Cache interface {
 // customization and the ability to estimate the byte
 // size of the cache.
 type lruCache struct {
-	dict            map[string]*list.Element // FastNode cache.
-	maxElementCount int                      // FastNode the maximum number of nodes in the cache.
-	ll              *list.List               // LRU queue of cache elements. Used for deletion.
+	dict            map[string]*cacheEntry
+	maxElementCount int
+	head            *cacheEntry
+	tail            *cacheEntry
+	len             int
 }
 
 var _ Cache = (*lruCache)(nil)
 
+type cacheEntry struct {
+	key  string
+	node Node
+	prev *cacheEntry
+	next *cacheEntry
+}
+
 func New(maxElementCount int) Cache {
 	return &lruCache{
-		dict:            make(map[string]*list.Element),
+		dict:            make(map[string]*cacheEntry),
 		maxElementCount: maxElementCount,
-		ll:              list.New(),
 	}
 }
 
 func (c *lruCache) Add(node Node) Node {
-	key := string(node.GetKey())
-	if e, exists := c.dict[key]; exists {
-		c.ll.MoveToFront(e)
-		old := e.Value
-		e.Value = node
-		return old.(Node)
+	key := ibytes.UnsafeBytesToStr(node.GetKey())
+	if entry, exists := c.dict[key]; exists {
+		c.moveToFront(entry)
+		old := entry.node
+		entry.node = node
+		return old
 	}
 
-	elem := c.ll.PushFront(node)
-	c.dict[key] = elem
+	entry := &cacheEntry{key: key, node: node}
+	c.pushFront(entry)
+	c.dict[key] = entry
+	c.len++
 
-	if c.ll.Len() > c.maxElementCount {
-		oldest := c.ll.Back()
-		return c.remove(oldest)
+	if c.len > c.maxElementCount {
+		return c.remove(c.tail)
 	}
 	return nil
 }
 
 func (c *lruCache) Get(key []byte) Node {
-	if ele, hit := c.dict[string(key)]; hit {
-		c.ll.MoveToFront(ele)
-		return ele.Value.(Node)
+	if entry, hit := c.dict[ibytes.UnsafeBytesToStr(key)]; hit {
+		c.moveToFront(entry)
+		return entry.node
 	}
 	return nil
 }
 
 func (c *lruCache) Has(key []byte) bool {
-	_, exists := c.dict[string(key)]
+	_, exists := c.dict[ibytes.UnsafeBytesToStr(key)]
 	return exists
 }
 
 func (c *lruCache) Len() int {
-	return c.ll.Len()
+	return c.len
 }
 
 func (c *lruCache) Remove(key []byte) Node {
-	keyS := string(key)
-	if elem, exists := c.dict[keyS]; exists {
-		return c.removeWithKey(elem, keyS)
+	if entry, exists := c.dict[ibytes.UnsafeBytesToStr(key)]; exists {
+		return c.remove(entry)
 	}
 	return nil
 }
 
-func (c *lruCache) remove(e *list.Element) Node {
-	removed := c.ll.Remove(e).(Node)
-	delete(c.dict, ibytes.UnsafeBytesToStr(removed.GetKey()))
-	return removed
+func (c *lruCache) moveToFront(entry *cacheEntry) {
+	if entry == nil || c.head == entry {
+		return
+	}
+	c.unlink(entry)
+	c.linkFront(entry)
 }
 
-func (c *lruCache) removeWithKey(e *list.Element, key string) Node {
-	removed := c.ll.Remove(e).(Node)
-	delete(c.dict, key)
-	return removed
+func (c *lruCache) pushFront(entry *cacheEntry) {
+	if entry == nil {
+		return
+	}
+	entry.prev = nil
+	entry.next = nil
+	c.linkFront(entry)
+}
+
+func (c *lruCache) linkFront(entry *cacheEntry) {
+	entry.prev = nil
+	entry.next = c.head
+	if c.head != nil {
+		c.head.prev = entry
+	} else {
+		c.tail = entry
+	}
+	c.head = entry
+}
+
+func (c *lruCache) unlink(entry *cacheEntry) {
+	if entry.prev != nil {
+		entry.prev.next = entry.next
+	} else {
+		c.head = entry.next
+	}
+	if entry.next != nil {
+		entry.next.prev = entry.prev
+	} else {
+		c.tail = entry.prev
+	}
+	entry.prev = nil
+	entry.next = nil
+}
+
+func (c *lruCache) remove(entry *cacheEntry) Node {
+	if entry == nil {
+		return nil
+	}
+	c.unlink(entry)
+	delete(c.dict, entry.key)
+	c.len--
+	return entry.node
 }
