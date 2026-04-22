@@ -13,8 +13,10 @@ import (
 	iavlrand "github.com/cosmos/iavl/internal/rand"
 )
 
-var benchNodeKeyBytesSink []byte
-var benchNodeSink *Node
+var (
+	benchNodeKeyBytesSink []byte
+	benchNodeSink         *Node
+)
 
 func TestNode_encodedSize(t *testing.T) {
 	nodeKey := &NodeKey{
