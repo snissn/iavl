@@ -20,6 +20,15 @@ type Node struct {
 
 var _ cache.Node = (*Node)(nil)
 
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
+
 // NewNode returns a new fast node from a value and version.
 func NewNode(key []byte, value []byte, version int64) *Node {
 	return &Node{
@@ -50,6 +59,14 @@ func DeserializeNode(key []byte, buf []byte) (*Node, error) {
 	}
 
 	return fastNode, nil
+}
+
+func (fn *Node) MaterializeOwnedBytes() {
+	if fn == nil {
+		return
+	}
+	fn.key = cloneBytes(fn.key)
+	fn.value = cloneBytes(fn.value)
 }
 
 func (fn *Node) GetKey() []byte {
