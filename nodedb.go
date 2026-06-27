@@ -220,9 +220,25 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 		node.materializeOwnedBytes()
 	}
 
-	ndb.nodeCache.Add(node)
+	if ndb.shouldCacheNodeAfterRead(node, copiedFromScratch) {
+		ndb.nodeCache.Add(node)
+	}
 
 	return node, nil
+}
+
+func (ndb *nodeDB) shouldCacheNodeAfterRead(node *Node, copiedFromScratch bool) bool {
+	if node == nil {
+		return false
+	}
+	// Nodes decoded over the reusable read scratch must be materialized before
+	// returning to callers. Avoid retaining those copied leaf key/value/hash
+	// buffers in the long-lived regular-node cache; internal nodes still carry
+	// traversal locality and stay cache-admitted.
+	if copiedFromScratch && node.isLeaf() {
+		return false
+	}
+	return true
 }
 
 func (ndb *nodeDB) GetFastNode(key []byte) (*fastnode.Node, error) {
