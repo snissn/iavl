@@ -37,6 +37,7 @@ const (
 	defaultStorageVersionValue = "1.0.0"
 	fastStorageVersionValue    = "1.1.0"
 	fastNodeCacheSize          = 100000
+	appendReadNodeCacheSizeCap = 300000
 )
 
 var (
@@ -101,6 +102,16 @@ type appendGetter interface {
 	GetAppend(key, dst []byte) ([]byte, error)
 }
 
+func effectiveNodeCacheSize(db dbm.DB, cacheSize int) int {
+	if cacheSize <= 0 {
+		return cacheSize
+	}
+	if _, ok := db.(appendGetter); ok && cacheSize > appendReadNodeCacheSizeCap {
+		return appendReadNodeCacheSizeCap
+	}
+	return cacheSize
+}
+
 func newNodeDB(db dbm.DB, cacheSize int, opts Options, lg Logger) *nodeDB {
 	storeVersion, err := db.Get(metadataKeyFormat.Key([]byte(storageVersionKey)))
 
@@ -120,7 +131,7 @@ func newNodeDB(db dbm.DB, cacheSize int, opts Options, lg Logger) *nodeDB {
 		latestVersion:       0, // initially invalid
 		legacyLatestVersion: 0,
 		pruneVersion:        0,
-		nodeCache:           cache.New(cacheSize),
+		nodeCache:           cache.New(effectiveNodeCacheSize(db, cacheSize)),
 		fastNodeCache:       cache.New(fastNodeCacheSize),
 		versionReaders:      make(map[int64]uint32, 8),
 		storageVersion:      string(storeVersion),

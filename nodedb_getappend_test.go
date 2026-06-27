@@ -25,6 +25,24 @@ func (d *appendReadDB) GetAppend(key, dst []byte) ([]byte, error) {
 	return dst, nil
 }
 
+func TestEffectiveNodeCacheSize_CapsAppendReadDB(t *testing.T) {
+	base := dbm.NewMemDB()
+	wrapped := &appendReadDB{DB: base}
+
+	require.Equal(t, appendReadNodeCacheSizeCap, effectiveNodeCacheSize(wrapped, appendReadNodeCacheSizeCap+1))
+	require.Equal(t, appendReadNodeCacheSizeCap, effectiveNodeCacheSize(wrapped, 781250))
+	require.Equal(t, appendReadNodeCacheSizeCap-1, effectiveNodeCacheSize(wrapped, appendReadNodeCacheSizeCap-1))
+	require.Equal(t, 0, effectiveNodeCacheSize(wrapped, 0))
+	require.Equal(t, -1, effectiveNodeCacheSize(wrapped, -1))
+}
+
+func TestEffectiveNodeCacheSize_PreservesRegularDB(t *testing.T) {
+	base := dbm.NewMemDB()
+
+	require.Equal(t, 781250, effectiveNodeCacheSize(base, 781250))
+	require.Equal(t, appendReadNodeCacheSizeCap+1, effectiveNodeCacheSize(base, appendReadNodeCacheSizeCap+1))
+}
+
 func descendToLeaf(t *testing.T, ndb *nodeDB, node *Node) *Node {
 	t.Helper()
 	cur := node
