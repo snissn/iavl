@@ -82,6 +82,48 @@ func TestNodeDBGetNode_GetAppendMaterializesOwnedBytes(t *testing.T) {
 	require.Equal(t, leafValBefore, leaf.value)
 }
 
+func TestNodeDBGetNode_GetAppendSkipsLeafCacheAdmission(t *testing.T) {
+	base := dbm.NewMemDB()
+	tree := NewMutableTree(base, 0, false, NewNopLogger())
+	for i := 0; i < 32; i++ {
+		updated, err := tree.Set([]byte(fmt.Sprintf("k%03d", i)), []byte(fmt.Sprintf("value-%03d-with-payload", i)))
+		require.NoError(t, err)
+		require.False(t, updated)
+	}
+	_, version, err := tree.SaveVersion()
+	require.NoError(t, err)
+
+	wrapped := &appendReadDB{DB: base}
+	stat := &Statistics{}
+	reopened := NewMutableTree(wrapped, 128, false, NewNopLogger(), StatOption(stat))
+	_, err = reopened.LoadVersion(version)
+	require.NoError(t, err)
+
+	rootKey, err := reopened.ndb.GetRoot(version)
+	require.NoError(t, err)
+	root, err := reopened.ndb.GetNode(rootKey)
+	require.NoError(t, err)
+	require.False(t, root.isLeaf())
+	require.True(t, reopened.ndb.nodeCache.Has(root.GetKey()), "scratch-loaded internal nodes remain cache-admitted")
+	appendCallsAfterRoot := wrapped.appendCalls
+	_, err = reopened.ndb.GetNode(root.GetKey())
+	require.NoError(t, err)
+	require.Equal(t, appendCallsAfterRoot, wrapped.appendCalls, "cache-admitted internal node should not read again")
+
+	leaf := descendToLeaf(t, reopened.ndb, root)
+	leafKey := append([]byte(nil), leaf.GetKey()...)
+	require.False(t, reopened.ndb.nodeCache.Has(leafKey), "scratch-loaded leaves should not be retained in node cache")
+
+	missesBefore := stat.GetCacheMissCnt()
+	appendCallsBeforeLeaf := wrapped.appendCalls
+	secondLeaf, err := reopened.ndb.GetNode(leafKey)
+	require.NoError(t, err)
+	require.Equal(t, leaf.value, secondLeaf.value)
+	require.Greater(t, wrapped.appendCalls, appendCallsBeforeLeaf, "uncached leaf read should hit append path again")
+	require.Greater(t, stat.GetCacheMissCnt(), missesBefore, "uncached leaf read should miss again")
+	require.False(t, reopened.ndb.nodeCache.Has(leafKey), "repeated scratch-loaded leaf reads remain uncached")
+}
+
 func TestNodeDBGetFastNode_GetAppendMaterializesOwnedBytes(t *testing.T) {
 	base := dbm.NewMemDB()
 	ndb := newNodeDB(base, 0, DefaultOptions(), NewNopLogger())
