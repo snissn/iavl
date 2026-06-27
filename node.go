@@ -45,6 +45,14 @@ func makeNodeKeyBytes(version int64, nonce uint32) []byte {
 	return key
 }
 
+func appendNodeKeyBytes(dst []byte, version int64, nonce uint32) ([]byte, []byte) {
+	offset := len(dst)
+	dst = dst[:offset+nodeKeySize]
+	key := dst[offset:]
+	encodeNodeKeyBytes(key, version, nonce)
+	return dst, key
+}
+
 func splitNodeKeyBytes(key []byte) (int64, uint32) {
 	return int64(binary.BigEndian.Uint64(key[:8])), binary.BigEndian.Uint32(key[8:]) // nolint:gosec // false positive
 }
@@ -190,6 +198,18 @@ func MakeNode(nk, buf []byte) (*Node, error) {
 			return nil, errors.New("invalid mode")
 		}
 
+		var childNodeKeys []byte
+		nonLegacyChildCount := 0
+		if mode&ModeLegacyLeftNode == 0 {
+			nonLegacyChildCount++
+		}
+		if mode&ModeLegacyRightNode == 0 {
+			nonLegacyChildCount++
+		}
+		if nonLegacyChildCount > 0 {
+			childNodeKeys = make([]byte, 0, nonLegacyChildCount*nodeKeySize)
+		}
+
 		if mode&ModeLegacyLeftNode != 0 { // legacy leftNodeKey
 			node.leftNodeKey, n, err = encoding.DecodeBytes(buf)
 			if err != nil {
@@ -215,7 +235,7 @@ func MakeNode(nk, buf []byte) (*Node, error) {
 			if nonce != int64(leftNonce) {
 				return nil, errors.New("invalid leftNodeKey.nonce, out of int32 range")
 			}
-			node.leftNodeKey = makeNodeKeyBytes(leftVersion, leftNonce)
+			childNodeKeys, node.leftNodeKey = appendNodeKeyBytes(childNodeKeys, leftVersion, leftNonce)
 		}
 		if mode&ModeLegacyRightNode != 0 { // legacy rightNodeKey
 			node.rightNodeKey, _, err = encoding.DecodeBytes(buf)
@@ -240,7 +260,7 @@ func MakeNode(nk, buf []byte) (*Node, error) {
 			if nonce != int64(rightNonce) {
 				return nil, errors.New("invalid rightNodeKey.nonce, out of int32 range")
 			}
-			node.rightNodeKey = makeNodeKeyBytes(rightVersion, rightNonce)
+			_, node.rightNodeKey = appendNodeKeyBytes(childNodeKeys, rightVersion, rightNonce)
 		}
 	}
 	return node, nil
@@ -317,8 +337,14 @@ func (node *Node) materializeOwnedBytes() {
 	node.key = cloneBytes(node.key)
 	node.value = cloneBytes(node.value)
 	node.hash = cloneBytes(node.hash)
-	node.leftNodeKey = cloneBytes(node.leftNodeKey)
-	node.rightNodeKey = cloneBytes(node.rightNodeKey)
+	// Non-legacy child keys are reconstructed into owned buffers by MakeNode.
+	// Legacy child hashes are decoded as views over the node bytes and must copy.
+	if len(node.leftNodeKey) == hashSize {
+		node.leftNodeKey = cloneBytes(node.leftNodeKey)
+	}
+	if len(node.rightNodeKey) == hashSize {
+		node.rightNodeKey = cloneBytes(node.rightNodeKey)
+	}
 }
 
 // String returns a string representation of the node key.

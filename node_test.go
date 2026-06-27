@@ -266,6 +266,30 @@ func BenchmarkMakeNode(b *testing.B) {
 			benchNodeSink = n
 		}
 	})
+
+	b.Run("leaf_materialize_owned", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			n, err := MakeNode(nodeKeyBytes, leafBytes)
+			if err != nil {
+				b.Fatalf("MakeNode(leaf): %v", err)
+			}
+			n.materializeOwnedBytes()
+			benchNodeSink = n
+		}
+	})
+
+	b.Run("inner_materialize_owned", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			n, err := MakeNode(nodeKeyBytes, innerBytes)
+			if err != nil {
+				b.Fatalf("MakeNode(inner): %v", err)
+			}
+			n.materializeOwnedBytes()
+			benchNodeSink = n
+		}
+	})
 }
 
 func BenchmarkNode_WriteBytes(b *testing.B) {
