@@ -85,6 +85,15 @@ func GetRootKey(version int64) []byte {
 	return makeNodeKeyBytes(version, 1)
 }
 
+func cloneBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
+
 // Node represents a node in a Tree.
 type Node struct {
 	key     []byte
@@ -299,6 +308,17 @@ func MakeLegacyNode(hash, buf []byte) (*Node, error) {
 		node.rightNodeKey = rightHash
 	}
 	return node, nil
+}
+
+func (node *Node) materializeOwnedBytes() {
+	if node == nil {
+		return
+	}
+	node.key = cloneBytes(node.key)
+	node.value = cloneBytes(node.value)
+	node.hash = cloneBytes(node.hash)
+	node.leftNodeKey = cloneBytes(node.leftNodeKey)
+	node.rightNodeKey = cloneBytes(node.rightNodeKey)
 }
 
 // String returns a string representation of the node key.
