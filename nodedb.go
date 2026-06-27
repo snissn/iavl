@@ -24,6 +24,7 @@ const (
 	int32Size         = 4
 	int64Size         = 8
 	hashSize          = sha256.Size
+	maxReadScratchCap = 4 << 20
 	genesisVersion    = 1
 	storageVersionKey = "storage_version"
 	// We store latest saved version together with storage version delimited by the constant below.
@@ -79,6 +80,7 @@ type nodeDB struct {
 	mtx                      sync.RWMutex     // Read/write lock.
 	done                     chan struct{}    // Channel to signal that the pruning process is done.
 	db                       dbm.DB           // Persistent node storage.
+	readScratch              []byte           // Reusable node read buffer for DBs that support append reads.
 	batch                    dbm.Batch        // Batched writing buffer.
 	opts                     Options          // Options to customize for pruning/writing
 	versionReaders           map[int64]uint32 // Number of active version readers
@@ -93,6 +95,10 @@ type nodeDB struct {
 	pendingFastNodeRemovals  [][]byte         // Fast node keys to remove from cache after batch commit.
 	isCommitting             bool             // Flag to indicate that the nodeDB is committing.
 	chCommitting             chan struct{}    // Channel to signal that the committing is done.
+}
+
+type appendGetter interface {
+	GetAppend(key, dst []byte) ([]byte, error)
 }
 
 func newNodeDB(db dbm.DB, cacheSize int, opts Options, lg Logger) *nodeDB {
@@ -129,6 +135,23 @@ func newNodeDB(db dbm.DB, cacheSize int, opts Options, lg Logger) *nodeDB {
 	return ndb
 }
 
+func (ndb *nodeDB) getNodeBytes(key []byte) ([]byte, bool, error) {
+	if getter, ok := ndb.db.(appendGetter); ok {
+		buf, err := getter.GetAppend(key, ndb.readScratch[:0])
+		return buf, buf != nil, err
+	}
+	buf, err := ndb.db.Get(key)
+	return buf, false, err
+}
+
+func (ndb *nodeDB) retainReadScratch(buf []byte) {
+	if cap(buf) > maxReadScratchCap {
+		ndb.readScratch = nil
+		return
+	}
+	ndb.readScratch = buf[:0]
+}
+
 // GetNode gets a node from memory or disk. If it is an inner node, it does not
 // load its children.
 // It is used for both formats of nodes: legacy and new.
@@ -157,7 +180,7 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 	} else {
 		nodeKey = ndb.nodeKey(nk)
 	}
-	buf, err := ndb.db.Get(nodeKey)
+	buf, copiedFromScratch, err := ndb.getNodeBytes(nodeKey)
 	if err != nil {
 		return nil, fmt.Errorf("can't get node %v: %v", nk, err)
 	}
@@ -166,7 +189,7 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 		version, nonce := splitNodeKeyBytes(nk)
 		if nonce == 1 {
 			nodeKey = ndb.nodeKey(makeNodeKeyBytes(version, 0))
-			buf, err = ndb.db.Get(nodeKey)
+			buf, copiedFromScratch, err = ndb.getNodeBytes(nodeKey)
 			if err != nil {
 				return nil, fmt.Errorf("can't get the reformatted node %v: %v", nk, err)
 			}
@@ -174,6 +197,11 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 	}
 	if buf == nil {
 		return nil, fmt.Errorf("Value missing for key %v corresponding to nodeKey %x", nk, nodeKey)
+	}
+	if copiedFromScratch {
+		defer func() {
+			ndb.retainReadScratch(buf)
+		}()
 	}
 
 	var node *Node
@@ -187,6 +215,9 @@ func (ndb *nodeDB) GetNode(nk []byte) (*Node, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error reading Node. bytes: %x, error: %v", buf, err)
 		}
+	}
+	if copiedFromScratch {
+		node.materializeOwnedBytes()
 	}
 
 	ndb.nodeCache.Add(node)
@@ -214,17 +245,25 @@ func (ndb *nodeDB) GetFastNode(key []byte) (*fastnode.Node, error) {
 	ndb.opts.Stat.IncFastCacheMissCnt()
 
 	// Doesn't exist, load.
-	buf, err := ndb.db.Get(ndb.fastNodeKey(key))
+	buf, copiedFromScratch, err := ndb.getNodeBytes(ndb.fastNodeKey(key))
 	if err != nil {
 		return nil, fmt.Errorf("can't get FastNode %X: %w", key, err)
 	}
 	if buf == nil {
 		return nil, nil
 	}
+	if copiedFromScratch {
+		defer func() {
+			ndb.retainReadScratch(buf)
+		}()
+	}
 
 	fastNode, err := fastnode.DeserializeNode(key, buf)
 	if err != nil {
 		return nil, fmt.Errorf("error reading FastNode. bytes: %x, error: %w", buf, err)
+	}
+	if copiedFromScratch {
+		fastNode.MaterializeOwnedBytes()
 	}
 	ndb.fastNodeCache.Add(fastNode)
 	return fastNode, nil
