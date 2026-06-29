@@ -128,7 +128,7 @@ func (i *Importer) writeNode(node *Node) error {
 	bytesCopy := make([]byte, buf.Len())
 	copy(bytesCopy, buf.Bytes())
 
-	if err := i.batch.Set(i.tree.ndb.nodeKey(node.GetKey()), bytesCopy); err != nil {
+	if err := batchSetOwned(i.batch, i.tree.ndb.nodeKey(node.GetKey()), bytesCopy); err != nil {
 		return err
 	}
 
@@ -247,7 +247,7 @@ func (i *Importer) Commit() error {
 
 	switch len(i.stack) {
 	case 0:
-		if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), []byte{}); err != nil {
+		if err := batchSetOwned(i.batch, i.tree.ndb.nodeKey(GetRootKey(i.version)), []byte{}); err != nil {
 			return err
 		}
 	case 1:
@@ -256,7 +256,7 @@ func (i *Importer) Commit() error {
 			return err
 		}
 		if i.stack[0].nodeKey.version < i.version { // it means there is no update in the given version
-			if err := i.batch.Set(i.tree.ndb.nodeKey(GetRootKey(i.version)), i.tree.ndb.nodeKey(i.stack[0].nodeKey.GetKey())); err != nil {
+			if err := batchSetOwned(i.batch, i.tree.ndb.nodeKey(GetRootKey(i.version)), i.tree.ndb.nodeKey(i.stack[0].nodeKey.GetKey())); err != nil {
 				return err
 			}
 		}
