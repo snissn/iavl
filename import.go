@@ -11,8 +11,58 @@ import (
 // maxBatchSize is the maximum size of the import batch before flushing it to the database
 const maxBatchSize = 10000
 
+const (
+	importerNonceChunkBits = 10
+	importerNonceChunkSize = 1 << importerNonceChunkBits
+	importerNonceChunkMask = importerNonceChunkSize - 1
+)
+
 // ErrNoImport is returned when calling methods on a closed importer
 var ErrNoImport = errors.New("no import in progress")
+
+type importerNonceCounter struct {
+	chunks      map[int64][]uint32
+	lastChunkID int64
+	lastChunk   []uint32
+}
+
+func (c *importerNonceCounter) next(version int64) uint32 {
+	chunkID := version >> importerNonceChunkBits
+	offset := int(version & importerNonceChunkMask)
+	chunk := c.lastChunk
+	if chunk == nil || chunkID != c.lastChunkID {
+		chunk = c.chunk(chunkID)
+	}
+	chunk[offset]++
+	// Nonce is 1-indexed, but starts at 2 since the root node uses nonce 1.
+	return chunk[offset] + 1
+}
+
+func (c *importerNonceCounter) chunk(chunkID int64) []uint32 {
+	if c.chunks == nil {
+		c.chunks = make(map[int64][]uint32, 1)
+	}
+	chunk := c.chunks[chunkID]
+	if chunk == nil {
+		chunk = make([]uint32, importerNonceChunkSize)
+		c.chunks[chunkID] = chunk
+	}
+	c.lastChunkID = chunkID
+	c.lastChunk = chunk
+	return chunk
+}
+
+func (c *importerNonceCounter) count(version int64) uint32 {
+	chunk := c.chunks[version>>importerNonceChunkBits]
+	if chunk == nil {
+		return 0
+	}
+	return chunk[int(version&importerNonceChunkMask)]
+}
+
+func (c *importerNonceCounter) activeChunks() int {
+	return len(c.chunks)
+}
 
 // Importer imports data into an empty MutableTree. It is created by MutableTree.Import(). Users
 // must call Close() when done.
@@ -27,7 +77,7 @@ type Importer struct {
 	batch     db.Batch
 	batchSize uint32
 	stack     []*Node
-	nonces    []uint32
+	nonces    importerNonceCounter
 
 	// inflightCommit tracks a batch commit, if any.
 	inflightCommit <-chan error
@@ -53,8 +103,11 @@ func newImporter(tree *MutableTree, version int64) (*Importer, error) {
 		version: version,
 		batch:   tree.ndb.db.NewBatch(),
 		stack:   make([]*Node, 0, 8),
-		nonces:  make([]uint32, version+1),
 	}, nil
+}
+
+func (i *Importer) nextNonce(version int64) uint32 {
+	return i.nonces.next(version)
 }
 
 // writeNode writes the node content to the storage.
@@ -173,11 +226,10 @@ func (i *Importer) Add(exportNode *ExportNode) error {
 		rightNode.leftNode = nil
 		rightNode.rightNode = nil
 	}
-	i.nonces[exportNode.Version]++
 	node.nodeKey = &NodeKey{
 		version: exportNode.Version,
 		// Nonce is 1-indexed, but start at 2 since the root node having a nonce of 1.
-		nonce: i.nonces[exportNode.Version] + 1,
+		nonce: i.nextNonce(exportNode.Version),
 	}
 
 	i.stack = append(i.stack, node)
