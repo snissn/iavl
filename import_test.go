@@ -3,6 +3,7 @@ package iavl
 import (
 	"encoding/binary"
 	"math"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -254,12 +255,48 @@ func TestImporter_Commit_Empty(t *testing.T) {
 	assert.EqualValues(t, 3, tree.Version())
 }
 
+func TestImporter_HighVersionSparseNonceAllocation(t *testing.T) {
+	const highVersion int64 = 25_000_000
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	tree := NewMutableTree(dbm.NewMemDB(), 0, false, NewNopLogger())
+	importer, err := tree.Import(highVersion)
+	require.NoError(t, err)
+	defer importer.Close()
+
+	runtime.ReadMemStats(&after)
+	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(4<<20))
+	require.Equal(t, 0, importer.nonces.activeChunks())
+
+	err = importer.Add(&ExportNode{Key: []byte("key"), Value: []byte("value"), Version: highVersion, Height: 0})
+	require.NoError(t, err)
+	require.Equal(t, 1, importer.nonces.activeChunks())
+	require.Equal(t, uint32(1), importer.nonces.count(highVersion))
+	require.Equal(t, highVersion, importer.stack[0].nodeKey.version)
+	require.Equal(t, uint32(2), importer.stack[0].nodeKey.nonce)
+}
+
 func BenchmarkImport(b *testing.B) {
 	benchmarkImport(b, 4096)
 }
 
 func BenchmarkImportBatch(b *testing.B) {
 	benchmarkImport(b, maxBatchSize*10)
+}
+
+func BenchmarkImporterHighVersionImport(b *testing.B) {
+	const highVersion int64 = 25_000_000
+
+	b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		tree := NewMutableTree(dbm.NewMemDB(), 0, false, NewNopLogger())
+		importer, err := tree.Import(highVersion)
+		require.NoError(b, err)
+		importer.Close()
+	}
 }
 
 func benchmarkImport(b *testing.B, nodes int) {
