@@ -19,6 +19,17 @@ type BatchWithFlusher struct {
 
 var _ dbm.Batch = (*BatchWithFlusher)(nil)
 
+type batchSetViewer interface {
+	SetView(key, value []byte) error
+}
+
+func batchSetOwned(batch dbm.Batch, key, value []byte) error {
+	if viewer, ok := batch.(batchSetViewer); ok {
+		return viewer.SetView(key, value)
+	}
+	return batch.Set(key, value)
+}
+
 // NewBatchWithFlusher returns new BatchWithFlusher wrapping the passed in batch
 func NewBatchWithFlusher(db dbm.DB, flushThreshold int) *BatchWithFlusher {
 	return &BatchWithFlusher{
@@ -58,12 +69,35 @@ func (b *BatchWithFlusher) Set(key, value []byte) error {
 	}
 	if batchSizeAfter > b.flushThreshold {
 		b.mtx.Unlock()
-		if err := b.Write(); err != nil {
+		err := b.Write()
+		b.mtx.Lock()
+		if err != nil {
 			return err
 		}
-		b.mtx.Lock()
 	}
 	return b.batch.Set(key, value)
+}
+
+// SetView records a Put without forcing another key/value copy when the
+// underlying batch supports view semantics. Callers must keep key/value
+// immutable until Write/WriteSync/Close returns.
+func (b *BatchWithFlusher) SetView(key, value []byte) error {
+	b.mtx.Lock()
+	defer b.mtx.Unlock()
+
+	batchSizeAfter, err := b.estimateSizeAfterSetting(key, value)
+	if err != nil {
+		return err
+	}
+	if batchSizeAfter > b.flushThreshold {
+		b.mtx.Unlock()
+		err := b.Write()
+		b.mtx.Lock()
+		if err != nil {
+			return err
+		}
+	}
+	return batchSetOwned(b.batch, key, value)
 }
 
 // Delete delete value at the given key to the db.
@@ -80,10 +114,11 @@ func (b *BatchWithFlusher) Delete(key []byte) error {
 	}
 	if batchSizeAfter > b.flushThreshold {
 		b.mtx.Unlock()
-		if err := b.Write(); err != nil {
+		err := b.Write()
+		b.mtx.Lock()
+		if err != nil {
 			return err
 		}
-		b.mtx.Lock()
 	}
 	return b.batch.Delete(key)
 }
