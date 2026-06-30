@@ -1,6 +1,7 @@
 package iavl
 
 import (
+	"errors"
 	"testing"
 
 	dbm "github.com/cosmos/iavl/db"
@@ -9,6 +10,8 @@ import (
 type stubViewBatch struct {
 	setCount     int
 	setViewCount int
+	writeErr     error
+	writeCount   int
 	size         int
 }
 
@@ -29,7 +32,10 @@ func (b *stubViewBatch) Delete(key []byte) error {
 	return nil
 }
 
-func (b *stubViewBatch) Write() error     { return nil }
+func (b *stubViewBatch) Write() error {
+	b.writeCount++
+	return b.writeErr
+}
 func (b *stubViewBatch) WriteSync() error { return nil }
 func (b *stubViewBatch) Close() error     { return nil }
 
@@ -60,6 +66,48 @@ func TestBatchWithFlusherSetView_ForwardsWhenAvailable(t *testing.T) {
 	}
 	if stub.setViewCount != 1 || stub.setCount != 0 {
 		t.Fatalf("expected SetView forwarding, set=%d setview=%d", stub.setCount, stub.setViewCount)
+	}
+}
+
+func TestBatchWithFlusherReturnsWriteErrorAfterThresholdFlush(t *testing.T) {
+	writeErr := errors.New("write failed")
+	tests := []struct {
+		name string
+		op   func(*BatchWithFlusher) error
+	}{
+		{
+			name: "set",
+			op: func(b *BatchWithFlusher) error {
+				return b.Set([]byte("key"), []byte("value"))
+			},
+		},
+		{
+			name: "set-view",
+			op: func(b *BatchWithFlusher) error {
+				return b.SetView([]byte("key"), []byte("value"))
+			},
+		},
+		{
+			name: "delete",
+			op: func(b *BatchWithFlusher) error {
+				return b.Delete([]byte("key"))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stub := &stubViewBatch{writeErr: writeErr}
+			b := &BatchWithFlusher{
+				batch:          stub,
+				flushThreshold: 1,
+			}
+			if err := tt.op(b); !errors.Is(err, writeErr) {
+				t.Fatalf("err=%v want %v", err, writeErr)
+			}
+			if stub.writeCount != 1 {
+				t.Fatalf("writeCount=%d want 1", stub.writeCount)
+			}
+		})
 	}
 }
 
